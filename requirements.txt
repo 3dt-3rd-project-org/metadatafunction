@@ -1,0 +1,7 @@
+azure-functions
+azure-storage-file-datalake
+ebooklib
+beautifulsoup4
+psycopg2-binary
+requests
+lxml
