@@ -46,6 +46,9 @@ def validate_epub(epub_bytes: BytesIO) -> tuple[bool, str]:
             mimetype_content = zf.read('mimetype').decode('utf-8', errors='ignore').strip()
             if mimetype_content != 'application/epub+zip':
                 return False, f"유효하지 않은 epub 파일입니다: mimetype={mimetype_content}"
+            
+            if 'META-INF/container.xml' not in names:
+                return False, "유효하지 않은 epub 파일입니다: container.xml 없음"
 
             has_opf = any(name.endswith('.opf') for name in names)
             if not has_opf:
