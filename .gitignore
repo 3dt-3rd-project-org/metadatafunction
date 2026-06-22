@@ -1,0 +1,13 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Azure Functions
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
