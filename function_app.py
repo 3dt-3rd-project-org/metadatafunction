@@ -13,7 +13,6 @@ import requests
 
 app = func.FunctionApp()
 
-# 환경변수 누락 체크
 REQUIRED_ENV_VARS = [
     'ADLS_ACCOUNT_KEY',
     'ADLS_ACCOUNT_NAME',
@@ -28,7 +27,6 @@ def check_env_vars() -> list[str]:
     return [var for var in REQUIRED_ENV_VARS if not os.environ.get(var)]
 
 
-# epub 유효성 검사
 def validate_epub(epub_bytes: BytesIO) -> tuple[bool, str]:
     """
     epub 파일 유효성 검사
@@ -37,36 +35,31 @@ def validate_epub(epub_bytes: BytesIO) -> tuple[bool, str]:
     반환: (is_valid, error_message)
     """
     epub_bytes.seek(0)
-    
-    # 1. zip 구조 검사
+
     try:
         with zipfile.ZipFile(epub_bytes) as zf:
             names = zf.namelist()
-            
-            # 2. mimetype 파일 존재 여부
+
             if 'mimetype' not in names:
                 return False, "유효하지 않은 epub 파일입니다: mimetype 파일 없음"
-            
-            # 3. mimetype 내용 검사
+
             mimetype_content = zf.read('mimetype').decode('utf-8', errors='ignore').strip()
             if mimetype_content != 'application/epub+zip':
                 return False, f"유효하지 않은 epub 파일입니다: mimetype={mimetype_content}"
-            
-            # 4. 필수 구조 파일 검사 (OPF)
+
             has_opf = any(name.endswith('.opf') for name in names)
             if not has_opf:
                 return False, "유효하지 않은 epub 파일입니다: OPF 파일 없음"
-                
+
     except zipfile.BadZipFile:
         return False, "유효하지 않은 epub 파일입니다: zip 구조 손상 (파일 내부가 비어있거나 손상됨)"
     except Exception as e:
         return False, f"epub 파일 검사 중 오류: {str(e)}"
-    
+
     epub_bytes.seek(0)
     return True, ""
 
 
-# 표지 이미지 추출
 def get_cover_image(book: epub.EpubBook) -> tuple[bytes, str] | tuple[None, None]:
     """
     우선순위:
@@ -81,14 +74,12 @@ def get_cover_image(book: epub.EpubBook) -> tuple[bytes, str] | tuple[None, None
         if item.get_type() == ebooklib.ITEM_IMAGE
     }
 
-    # 1순위: manifest properties
     for item in book.get_items():
         if item.get_type() == ebooklib.ITEM_IMAGE:
             if hasattr(item, 'properties') and 'cover-image' in (item.properties or []):
                 logging.info(f"표지 발견 (1순위 properties): {item.get_name()}")
                 return item.get_content(), item.get_name()
 
-    # 2순위: metadata meta name="cover"
     for meta in book.metadata.get('http://www.idpf.org/2007/opf', {}).get('meta', []):
         if isinstance(meta, tuple) and len(meta) > 1:
             attrs = meta[1] if isinstance(meta[1], dict) else {}
@@ -99,13 +90,11 @@ def get_cover_image(book: epub.EpubBook) -> tuple[bytes, str] | tuple[None, None
                     logging.info(f"표지 발견 (2순위 meta): {item.get_name()}")
                     return item.get_content(), item.get_name()
 
-    # 3순위: ebooklib ITEM_COVER
     for item in book.get_items():
         if item.get_type() == ebooklib.ITEM_COVER:
             logging.info(f"표지 발견 (3순위 ITEM_COVER): {item.get_name()}")
             return item.get_content(), item.get_name()
 
-    # 4순위: 파일명 cover 포함 이미지 중 용량 최대
     cover_candidates = [
         item for name, item in images.items()
         if 'cover' in name.lower()
@@ -119,14 +108,14 @@ def get_cover_image(book: epub.EpubBook) -> tuple[bytes, str] | tuple[None, None
     return None, None
 
 
-# 메인 함수
 @app.route(route="metadata_parser", methods=["POST"])
 def metadata_parser(req: func.HttpRequest) -> func.HttpResponse:
     logging.info('메타데이터 파싱 함수 시작')
 
     conn = None
+    adls_client = None
     books_id = None
-    cover_filename = None  # DB 실패 시 ADLS에서 삭제
+    cover_filename = None  # DB insert 실패 시 ADLS cover cleanup용
 
     # 1. 환경변수 누락 체크
     missing_vars = check_env_vars()
@@ -198,10 +187,10 @@ def metadata_parser(req: func.HttpRequest) -> func.HttpResponse:
         book = epub.read_epub(epub_bytes)
         DC = 'http://purl.org/dc/elements/1.1/'
 
-        raw_title     = book.get_metadata(DC, 'title')
-        raw_author    = book.get_metadata(DC, 'creator')
-        raw_publisher = book.get_metadata(DC, 'publisher')
-        raw_date      = book.get_metadata(DC, 'date')
+        raw_title      = book.get_metadata(DC, 'title')
+        raw_author     = book.get_metadata(DC, 'creator')
+        raw_publisher  = book.get_metadata(DC, 'publisher')
+        raw_date       = book.get_metadata(DC, 'date')
         raw_identifier = book.get_metadata(DC, 'identifier')
 
         title_str     = (raw_title     or [['제목 없음']])[0][0].strip()
@@ -246,7 +235,7 @@ def metadata_parser(req: func.HttpRequest) -> func.HttpResponse:
         )
         cur = conn.cursor()
 
-        # epub_blob_path 중복 시 기존 row 반환
+        # epub_blob_path 중복 시 기존 row 반환 (재시도 안전)
         cur.execute("""
             INSERT INTO books (title, author, publisher, published_year, cover_url, isbn, admin_id, epub_blob_path)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
@@ -269,8 +258,7 @@ def metadata_parser(req: func.HttpRequest) -> func.HttpResponse:
         conn.commit()
         cur.close()
 
-        # DB 성공 후 cover_filename 초기화
-        cover_filename = None
+        cover_filename = None  # DB 성공 후 cleanup 불필요
 
         # 7. 완료 알림
         _notify(
@@ -302,19 +290,14 @@ def metadata_parser(req: func.HttpRequest) -> func.HttpResponse:
         if conn:
             conn.rollback()
 
-        # 커버 고아 방지: DB 실패 시 ADLS 커버 삭제
-        if cover_filename:
+        # DB insert 실패 시 업로드된 cover cleanup
+        if cover_filename and adls_client:
             try:
-                adls_client = DataLakeServiceClient(
-                    account_url=f"https://{os.environ['ADLS_ACCOUNT_NAME']}.dfs.core.windows.net",
-                    credential=os.environ['ADLS_ACCOUNT_KEY']
-                )
                 adls_client.get_file_system_client("cover").get_file_client(cover_filename).delete_file()
-                logging.info(f"고아 커버 이미지 삭제 완료: {cover_filename}")
+                logging.info(f"DB insert 실패로 인한 cover cleanup 완료: {cover_filename}")
             except Exception as cleanup_err:
-                logging.warning(f"커버 이미지 삭제 실패 (무시): {cleanup_err}")
+                logging.warning(f"cover cleanup 실패 (무시): {cleanup_err}")
 
-        # books_id 있을 때만 payload에 포함
         error_payload = {
             "step": "metadata_parsing",
             "message": "메타데이터 파싱 중 오류 발생",
@@ -334,8 +317,7 @@ def metadata_parser(req: func.HttpRequest) -> func.HttpResponse:
         if conn:
             conn.close()
 
-
-# Webhook 헬퍼
+# 웹훅 헬퍼
 def _notify(event: str, payload: dict) -> None:
     webhook_url = os.environ.get("WEBHOOK_URL")
     if not webhook_url:
