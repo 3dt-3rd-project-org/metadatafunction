@@ -118,6 +118,7 @@ def metadata_parser(req: func.HttpRequest) -> func.HttpResponse:
     conn = None
     adls_client = None
     books_id = None
+    admin_id = None
     cover_filename = None  # DB insert 실패 시 ADLS cover cleanup용
 
     # 1. 환경변수 누락 체크
@@ -176,6 +177,7 @@ def metadata_parser(req: func.HttpRequest) -> func.HttpResponse:
                 event="error",
                 payload={
                     "step": "epub_validation",
+                    "admin_id": admin_id,
                     "message": validation_error,
                     "error": validation_error
                 }
@@ -304,7 +306,8 @@ def metadata_parser(req: func.HttpRequest) -> func.HttpResponse:
         error_payload = {
             "step": "metadata_parsing",
             "message": "메타데이터 파싱 중 오류 발생",
-            "error": str(e)
+            "error": str(e),
+            "admin_id": admin_id
         }
         if books_id is not None:
             error_payload["books_id"] = books_id
